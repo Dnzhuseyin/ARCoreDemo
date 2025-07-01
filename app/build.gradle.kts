@@ -62,7 +62,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.3.1")
     implementation("androidx.camera:camera-view:1.3.1")
 
-    // OpenGL ES support
+    // OpenGL ES support and 3D rendering
     implementation("org.rajawali3d:rajawali:1.2.1970")
 
     // Permissions
