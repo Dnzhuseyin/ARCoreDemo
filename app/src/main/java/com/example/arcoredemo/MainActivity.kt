@@ -182,7 +182,7 @@ class MainActivity : ComponentActivity() {
     private class BackgroundRenderer {
         private var quadVertices: FloatBuffer? = null
         private var quadTexCoord: FloatBuffer? = null
-        private var quadIndices: FloatBuffer? = null
+        private var quadTexCoordTransformed: FloatBuffer? = null
         
         private var quadProgram = 0
         private var quadPositionParam = 0
@@ -201,6 +201,14 @@ class MainActivity : ComponentActivity() {
             0.0f, 0.0f,
             1.0f, 1.0f,
             1.0f, 0.0f
+        )
+        
+        // NDC coordinates for transformation (same size as texture coordinates)
+        private val NDC_QUAD_COORDS = floatArrayOf(
+            -1.0f, -1.0f,
+            -1.0f, +1.0f,
+            +1.0f, -1.0f,
+            +1.0f, +1.0f
         )
         
         private val VERTEX_SHADER = """
@@ -234,18 +242,25 @@ class MainActivity : ComponentActivity() {
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
             
-            // Create buffers
+            // Create vertex buffer (3D coordinates for rendering)
             quadVertices = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer()
                 .put(QUAD_COORDS)
             quadVertices?.position(0)
             
+            // Create texture coordinate buffer
             quadTexCoord = ByteBuffer.allocateDirect(QUAD_TEXCOORDS.size * 4)
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer()
                 .put(QUAD_TEXCOORDS)
             quadTexCoord?.position(0)
+            
+            // Create transformed texture coordinate buffer
+            quadTexCoordTransformed = ByteBuffer.allocateDirect(QUAD_TEXCOORDS.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+            quadTexCoordTransformed?.position(0)
             
             // Create shader program
             val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
@@ -269,12 +284,26 @@ class MainActivity : ComponentActivity() {
         
         fun draw(frame: Frame) {
             if (frame.hasDisplayGeometryChanged()) {
-                frame.transformCoordinates2d(
-                    Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
-                    quadVertices,
-                    Coordinates2d.TEXTURE_NORMALIZED,
-                    quadTexCoord
-                )
+                // Create NDC buffer for transformation
+                val ndcBuffer = ByteBuffer.allocateDirect(NDC_QUAD_COORDS.size * 4)
+                    .order(ByteOrder.nativeOrder())
+                    .asFloatBuffer()
+                    .put(NDC_QUAD_COORDS)
+                ndcBuffer.position(0)
+                
+                try {
+                    // Transform coordinates - both buffers must have same size
+                    frame.transformCoordinates2d(
+                        Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                        ndcBuffer,
+                        Coordinates2d.TEXTURE_NORMALIZED,
+                        quadTexCoordTransformed
+                    )
+                } catch (e: Exception) {
+                    // If transformation fails, use default texture coordinates
+                    quadTexCoordTransformed?.put(QUAD_TEXCOORDS)
+                    quadTexCoordTransformed?.position(0)
+                }
             }
             
             // Draw the background
@@ -285,7 +314,7 @@ class MainActivity : ComponentActivity() {
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
             
             GLES20.glVertexAttribPointer(quadPositionParam, 3, GLES20.GL_FLOAT, false, 0, quadVertices)
-            GLES20.glVertexAttribPointer(quadTexCoordParam, 2, GLES20.GL_FLOAT, false, 0, quadTexCoord)
+            GLES20.glVertexAttribPointer(quadTexCoordParam, 2, GLES20.GL_FLOAT, false, 0, quadTexCoordTransformed)
             
             GLES20.glEnableVertexAttribArray(quadPositionParam)
             GLES20.glEnableVertexAttribArray(quadTexCoordParam)
