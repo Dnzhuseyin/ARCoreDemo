@@ -2,8 +2,10 @@ package com.example.arcoredemo
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.opengl.Matrix
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -22,6 +24,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.arcoredemo.ui.theme.ARCoreDemoTheme
 import com.google.ar.core.*
 import com.google.ar.core.exceptions.*
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -31,6 +36,7 @@ class MainActivity : ComponentActivity() {
     private var glSurfaceView: GLSurfaceView? = null
     private var surfaceCreated = false
     private var installRequested = false
+    private var backgroundRenderer: BackgroundRenderer? = null
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -140,6 +146,11 @@ class MainActivity : ComponentActivity() {
     private inner class ArRenderer : GLSurfaceView.Renderer {
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
+            
+            // Initialize background renderer
+            backgroundRenderer = BackgroundRenderer()
+            backgroundRenderer?.createOnGlThread()
+            
             surfaceCreated = true
             checkCameraPermissionAndSetup()
         }
@@ -154,16 +165,138 @@ class MainActivity : ComponentActivity() {
             
             arSession?.let { session ->
                 try {
-                    session.setCameraTextureName(0)
+                    session.setCameraTextureName(backgroundRenderer?.textureId ?: 0)
                     val frame = session.update()
                     
-                    // Basic rendering - just clear the screen
-                    // In a real app, you would render the camera background and AR objects here
+                    // Draw the camera background
+                    backgroundRenderer?.draw(frame)
                     
                 } catch (e: CameraNotAvailableException) {
                     // Handle camera not available
                 }
             }
+        }
+    }
+
+    // Background renderer class for camera feed
+    private class BackgroundRenderer {
+        private var quadVertices: FloatBuffer? = null
+        private var quadTexCoord: FloatBuffer? = null
+        private var quadIndices: FloatBuffer? = null
+        
+        private var quadProgram = 0
+        private var quadPositionParam = 0
+        private var quadTexCoordParam = 0
+        var textureId = 0
+        
+        private val QUAD_COORDS = floatArrayOf(
+            -1.0f, -1.0f, 0.0f,
+            -1.0f, +1.0f, 0.0f,
+            +1.0f, -1.0f, 0.0f,
+            +1.0f, +1.0f, 0.0f
+        )
+        
+        private val QUAD_TEXCOORDS = floatArrayOf(
+            0.0f, 1.0f,
+            0.0f, 0.0f,
+            1.0f, 1.0f,
+            1.0f, 0.0f
+        )
+        
+        private val VERTEX_SHADER = """
+            attribute vec4 a_Position;
+            attribute vec2 a_TexCoord;
+            varying vec2 v_TexCoord;
+            void main() {
+                gl_Position = a_Position;
+                v_TexCoord = a_TexCoord;
+            }
+        """.trimIndent()
+        
+        private val FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 v_TexCoord;
+            uniform samplerExternalOES sTexture;
+            void main() {
+                gl_FragColor = texture2D(sTexture, v_TexCoord);
+            }
+        """.trimIndent()
+        
+        fun createOnGlThread() {
+            // Generate texture
+            val textures = IntArray(1)
+            GLES20.glGenTextures(1, textures, 0)
+            textureId = textures[0]
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+            
+            // Create buffers
+            quadVertices = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+                .put(QUAD_COORDS)
+            quadVertices?.position(0)
+            
+            quadTexCoord = ByteBuffer.allocateDirect(QUAD_TEXCOORDS.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+                .put(QUAD_TEXCOORDS)
+            quadTexCoord?.position(0)
+            
+            // Create shader program
+            val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
+            val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
+            
+            quadProgram = GLES20.glCreateProgram()
+            GLES20.glAttachShader(quadProgram, vertexShader)
+            GLES20.glAttachShader(quadProgram, fragmentShader)
+            GLES20.glLinkProgram(quadProgram)
+            
+            quadPositionParam = GLES20.glGetAttribLocation(quadProgram, "a_Position")
+            quadTexCoordParam = GLES20.glGetAttribLocation(quadProgram, "a_TexCoord")
+        }
+        
+        private fun loadShader(type: Int, shaderCode: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, shaderCode)
+            GLES20.glCompileShader(shader)
+            return shader
+        }
+        
+        fun draw(frame: Frame) {
+            if (frame.hasDisplayGeometryChanged()) {
+                frame.transformCoordinates2d(
+                    Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                    quadVertices,
+                    Coordinates2d.TEXTURE_NORMALIZED,
+                    quadTexCoord
+                )
+            }
+            
+            // Draw the background
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+            GLES20.glDepthMask(false)
+            
+            GLES20.glUseProgram(quadProgram)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+            
+            GLES20.glVertexAttribPointer(quadPositionParam, 3, GLES20.GL_FLOAT, false, 0, quadVertices)
+            GLES20.glVertexAttribPointer(quadTexCoordParam, 2, GLES20.GL_FLOAT, false, 0, quadTexCoord)
+            
+            GLES20.glEnableVertexAttribArray(quadPositionParam)
+            GLES20.glEnableVertexAttribArray(quadTexCoordParam)
+            
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            
+            GLES20.glDisableVertexAttribArray(quadPositionParam)
+            GLES20.glDisableVertexAttribArray(quadTexCoordParam)
+            
+            GLES20.glDepthMask(true)
+            GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         }
     }
 
